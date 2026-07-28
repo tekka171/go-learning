@@ -42,7 +42,7 @@ func IsAnagram(s1 string, s2 string) bool { //2 map, 3 loops
 
 	mapS1 := make(map[rune]int, lenS1)
 	mapS2 := make(map[rune]int, lenS2)
-	for i, _ := range s1 {
+	for i := range s1 {
 		mapS1[rune(s1[i])]++
 		mapS2[rune(s2[i])]++
 	}
