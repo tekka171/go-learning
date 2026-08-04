@@ -76,6 +76,15 @@ func ValidPalindromeV3(s string) bool { //two pointer, no rune convert, ASCII on
 	return true
 }
 
+func ValidPalindromeV4(s string) bool { //try recursive, Time O(n), Space O(n) because new string 's' every stack
+	if len(s) <= 1 { //empty or 1 char is palindrome
+		return true
+	}
+
+	matched := s[0] == s[len(s)-1]                     // is a match first & last char
+	return matched && ValidPalindromeV4(s[1:len(s)-1]) //recursive with shrink value
+}
+
 func isAlphanumericCharacter(c byte) bool {
 	if (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') {
 		return true
@@ -290,4 +299,53 @@ func DetectCycleInLinkedListV3(listNode *ListNode) bool { //Optimized, fastNode 
 	}
 
 	return false
+}
+
+// Find the length of the longest substring with at most 2 distinct characters
+func LongestSubstringWithMost2DistinctCharacters(s string) int { //Brute force, Time O(n^2), Space O(1)
+	var res int
+
+	for i := range s {
+		substringMap := map[rune]int{}
+		for j := i; j < len(s); j++ {
+			substringMap[rune(s[j])]++
+
+			if len(substringMap) > 2 {
+				break
+			}
+
+			//get longest
+			lenSubstring := j - i + 1
+			if res < lenSubstring {
+				res = lenSubstring
+			}
+		}
+	}
+
+	return res
+}
+
+// Find the length of the longest substring with at most 2 distinct characters
+func LongestSubstringWithMost2DistinctCharactersV2(s string) int { //Sliding Window, Time O(n), Space O(1)
+	var res int
+
+	distinctMap := map[rune]int{}
+	left := 0
+	for right := range s {
+		distinctMap[rune(s[right])]++
+
+		for len(distinctMap) > 2 { //shrink if got more than 2 distinct
+			key := rune(s[left])
+			distinctMap[key]--
+			if distinctMap[key] == 0 {
+				delete(distinctMap, key)
+			}
+			left++
+		}
+
+		//get longest
+		res = max(res, right-left+1)
+	}
+
+	return res
 }

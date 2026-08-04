@@ -113,6 +113,34 @@ func TestDetectCycleInLinkedList(t *testing.T) {
 	}
 }
 
+func TestLongestSubstringWithMost2DistinctCharacters(t *testing.T) {
+	tests := []struct {
+		name     string
+		input    string
+		expected int
+	}{
+		{name: "empty string", input: "", expected: 0},
+		{name: "single character", input: "a", expected: 1},
+		{name: "two distinct characters", input: "eceba", expected: 3},
+		{name: "all same character", input: "aaaa", expected: 4},
+		{name: "more than two distinct characters", input: "abc", expected: 2},
+		{name: "mixed repeated pattern", input: "aaabb", expected: 5},
+		{name: "run of one repeated char", input: "abbb", expected: 4},
+		{name: "prefix with one distinct char", input: "baaa", expected: 4},
+		{name: "alternating pattern", input: "ababac", expected: 5},
+		{name: "three distinct with one repeated", input: "aabaccc", expected: 4},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := LongestSubstringWithMost2DistinctCharactersV2(tt.input)
+			if result != tt.expected {
+				t.Fatalf("expected %d, got %d", tt.expected, result)
+			}
+		})
+	}
+}
+
 func normalizeTriplets(triplets [][]int) [][]int {
 	normalized := make([][]int, len(triplets))
 	for i, triplet := range triplets {
