@@ -1,6 +1,9 @@
 package training
 
-import "testing"
+import (
+	"errors"
+	"testing"
+)
 
 type lruOp struct {
 	op     string // "put" or "get"
@@ -106,7 +109,10 @@ func TestLRUCache(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			cache := Constructor(tt.capacity)
+			cache, err := NewLRU(tt.capacity)
+			if err != nil {
+				t.Fatalf("unexpected error from Constructor(%d): %v", tt.capacity, err)
+			}
 
 			for i, op := range tt.ops {
 				switch op.op {
@@ -122,5 +128,19 @@ func TestLRUCache(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestLRUCacheConstructorInvalidCapacity(t *testing.T) {
+	tests := []int{0, -1, -5}
+
+	for _, capacity := range tests {
+		cache, err := NewLRU(capacity)
+		if !errors.Is(err, ErrInvalidCapacity) {
+			t.Fatalf("Constructor(%d) error = %v, want ErrInvalidCapacity", capacity, err)
+		}
+		if cache != nil {
+			t.Fatalf("Constructor(%d) cache = %v, want nil", capacity, cache)
+		}
 	}
 }

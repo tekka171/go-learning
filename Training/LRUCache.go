@@ -1,6 +1,9 @@
 package training
 
-import "sync"
+import (
+	"errors"
+	"sync"
+)
 
 // Rules:
 // Get(key): return the value if the key exists, otherwise return -1. A successful Get marks the key as most recently used.
@@ -9,98 +12,106 @@ import "sync"
 // Both Get and Put must run in O(1) time.
 
 type LRUCache struct {
-	mu       sync.Mutex //to support goroutine, single lock, but heavy & is a bottleneck
-	mapCache map[int]*Node
+	mu       sync.Mutex //to support goroutine, single lock
+	items    map[int]*node
 	capacity int
-	head     *Node // most recent
-	tail     *Node // least recent
+	head     *node // most recent
+	tail     *node // least recent
 }
 
-type Node struct {
+type node struct {
 	key   int
 	value int
-	prev  *Node //left side
-	next  *Node //right side
+	prev  *node //left side
+	next  *node //right side
 }
 
-//Assume capacity always > 0
-func Constructor(capacity int) *LRUCache {
-	return &LRUCache{
-		mapCache: make(map[int]*Node, capacity),
-		capacity: capacity,
+var (
+	ErrInvalidCapacity = errors.New("capacity must be > 0")
+)
+
+func NewLRU(capacity int) (*LRUCache, error) {
+	if capacity <= 0 {
+		return nil, ErrInvalidCapacity
 	}
+
+	return &LRUCache{
+		items:    make(map[int]*node, capacity),
+		capacity: capacity,
+	}, nil
 }
 
 func (c *LRUCache) Get(key int) int {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	currNode, ok := c.mapCache[key]
+	currNode, ok := c.items[key]
 	if !ok {
 		return -1
 	}
 
-	if currNode != c.head {
-		c.remove(currNode)
-		c.addToFront(currNode)
-	}
-
+	c.moveToFront(currNode)
 	return currNode.value
 }
 
-func (c *LRUCache) addToFront(node *Node) {
+func (c *LRUCache) addToFront(node *node) {
+	node.prev = nil
+	node.next = c.head
 	if c.head == nil {
-		c.head = node
 		c.tail = node
 	} else {
 		c.head.prev = node
-		node.prev = nil
-		node.next = c.head
-		c.head = node
 	}
+	c.head = node
 }
 
-func (c *LRUCache) remove(node *Node) {
-	if node.prev == nil && node.next == nil {
-		c.head = nil
-		c.tail = nil
-	} else if c.head == node {
-		node.next.prev = nil
-		c.head = node.next
-	} else if c.tail == node {
-		node.prev.next = nil
-		c.tail = node.prev
+func (c *LRUCache) remove(node *node) {
+	if node.prev != nil {
+		node.prev.next = node.next
 	} else {
-		node.next.prev, node.prev.next = node.prev, node.next
+		c.head = node.next
+	}
+
+	if node.next != nil {
+		node.next.prev = node.prev
+	} else {
+		c.tail = node.prev
 	}
 
 	node.prev = nil
 	node.next = nil
 }
 
+func (c *LRUCache) moveToFront(node *node) {
+	if c.head == node {
+		return
+	}
+
+	c.remove(node)
+	c.addToFront(node)
+}
+
 func (c *LRUCache) Put(key int, value int) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	currNode, ok := c.mapCache[key]
-	if !ok {
-		// if over capacity, evict the least recently used key
-		if len(c.mapCache) == c.capacity {
-			lru := c.tail
-			c.remove(lru)
-			delete(c.mapCache, lru.key)
-		}
-
-		currNode = &Node{
-			key:   key,
-			value: value,
-		}
-		c.addToFront(currNode)
-		c.mapCache[key] = currNode
+	if currNode, ok := c.items[key]; ok { // if exist, then do update
+		currNode.value = value
+		c.moveToFront(currNode)
 		return
 	}
 
-	currNode.value = value
-	c.remove(currNode)
+	// if at capacity, evict the least recently used key
+	if len(c.items) == c.capacity {
+		lru := c.tail
+		c.remove(lru)
+		delete(c.items, lru.key)
+	}
+
+	currNode := &node{
+		key:   key,
+		value: value,
+	}
 	c.addToFront(currNode)
+	c.items[key] = currNode
 }

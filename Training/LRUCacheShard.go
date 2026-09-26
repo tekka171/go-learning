@@ -1,11 +1,25 @@
 package training
 
+import "errors"
+
 type LRUCacheShard struct {
 	shards []*LRUCache
 }
 
-// Assume capacity always > 0 & is bigger than shardCount
-func ConstructorShard(shardCount int, capacity int) *LRUCacheShard {
+var (
+	ErrInvalidShardCount    = errors.New("shardCount must be > 0")
+	ErrInvalidShardCapacity = errors.New("capacity must be >= shardCount")
+)
+
+func NewLRUSharded(shardCount, capacity int) (*LRUCacheShard, error) {
+	if shardCount <= 0 {
+		return nil, ErrInvalidShardCount
+	}
+
+	if capacity < shardCount {
+		return nil, ErrInvalidShardCapacity
+	}
+
 	s := &LRUCacheShard{
 		shards: make([]*LRUCache, shardCount),
 	}
@@ -15,15 +29,18 @@ func ConstructorShard(shardCount int, capacity int) *LRUCacheShard {
 
 	for i := range s.shards {
 		finalCap := baseCap
-
 		if i < extraCap {
 			finalCap++ //spread extra cap through the shards
 		}
 
-		s.shards[i] = Constructor(finalCap)
+		shard, err := NewLRU(finalCap)
+		if err != nil {
+			return nil, err
+		}
+		s.shards[i] = shard
 	}
 
-	return s
+	return s, nil
 }
 
 func (c *LRUCacheShard) shardFor(key int) *LRUCache {
