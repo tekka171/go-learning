@@ -29,7 +29,6 @@ type RedisValue struct {
 
 func NewRedis() *Redis {
 	return &Redis{
-		mu:       sync.RWMutex{},
 		redisMap: map[string]RedisValue{},
 	}
 }
