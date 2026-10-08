@@ -19,9 +19,12 @@ import (
 // - Close works when there is no janitor (interval 0).
 
 type Store struct {
-	mu    sync.RWMutex
-	items map[string]*item
-	now   func() time.Time
+	mu               sync.RWMutex
+	items            map[string]*item
+	now              func() time.Time
+	janitorCloseOnce sync.Once      // ensures janitor closed once
+	janitorDone      chan struct{}  // to signal janitor to stop
+	janitorWg        sync.WaitGroup // ensures Close() to wait for the janitor to finished
 }
 
 type item struct {
@@ -33,11 +36,53 @@ type item struct {
 // cleanupInterval == 0 means no janitor (lazy expiration only)
 func NewStore(cleanupInterval time.Duration) *Store {
 	s := &Store{
-		items: map[string]*item{},
-		now:   time.Now,
+		items:       map[string]*item{},
+		now:         time.Now,
+		janitorDone: make(chan struct{}),
+	}
+
+	if cleanupInterval > 0 {
+		s.janitorWg.Add(1)
+		go s.janitor(s.janitorDone, cleanupInterval)
 	}
 
 	return s
+}
+
+func (s *Store) janitor(done <-chan struct{}, interval time.Duration) {
+	defer s.janitorWg.Done()
+
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ticker.C:
+			s.deleteExpired()
+		case <-done:
+			return
+		}
+	}
+}
+
+func (s *Store) deleteExpired() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	now := s.now()
+	for k, v := range s.items {
+		if v.expired(now) {
+			delete(s.items, k)
+		}
+	}
+}
+
+// stops the janitor and waits for it to exit
+func (s *Store) Close() {
+	s.janitorCloseOnce.Do(func() {
+		close(s.janitorDone)
+		s.janitorWg.Wait()
+	})
 }
 
 // ttl == 0 means the key never expires

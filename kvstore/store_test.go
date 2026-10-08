@@ -347,3 +347,54 @@ func TestConcurrentAccessWithExpiry(t *testing.T) {
 	}
 	wg.Wait()
 }
+
+func TestCloseWithZeroInterval(t *testing.T) {
+	s := NewStore(0)
+	s.Close()
+}
+
+func TestCloseMoreThanOnce(t *testing.T) {
+	s := NewStore(10 * time.Second)
+	s.Close()
+	s.Close()
+}
+
+func TestJanitorWorks(t *testing.T) {
+	s := NewStore(5 * time.Millisecond)
+	defer s.Close()
+
+	s.Set("k", []byte("hello"), 1*time.Millisecond)
+	time.Sleep(50 * time.Millisecond)
+
+	s.mu.RLock()
+	if _, ok := s.items["k"]; ok {
+		t.Fatalf("item should be cleanup already by janitor")
+	}
+	s.mu.RUnlock()
+}
+
+func TestDeleteExpired(t *testing.T) {
+	s, now := newTestStore()
+	s.Set("k1", []byte("hello 1"), 10*time.Second)
+	s.Set("k2", []byte("hello 2"), 100*time.Second)
+	s.Set("k3", []byte("hello 3"), 0)
+
+	*now = now.Add(50 * time.Second)
+	s.deleteExpired()
+
+	if got := len(s.items); got != 2 {
+		t.Fatalf("len(items) = %d, want 2", got)
+	}
+
+	if _, ok := s.items["k1"]; ok {
+		t.Fatalf("k1 is expired and should have been removed")
+	}
+
+	if _, ok := s.items["k2"]; !ok {
+		t.Fatalf("k2 is alive and should have been kept")
+	}
+
+	if _, ok := s.items["k3"]; !ok {
+		t.Fatalf("k3 has no TTL and should have been kept")
+	}
+}
