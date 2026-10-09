@@ -1,6 +1,8 @@
 package training
 
-import "math"
+import (
+	"math"
+)
 
 func ReverseString(s string) string { //less efficient, more memory allocation
 	var res string
@@ -107,7 +109,26 @@ func IsAnagramV3(s1 string, s2 string) bool { //true O(1) space, 3 loops
 	return true
 }
 
-func FirstNonRepeatingCharacter(s string) rune {
+func FirstNonRepeatingCharacter(s string) rune { //Brute force, Time O(n^2), Space O(1)
+	var res rune
+
+	for i := range s {
+		var count int
+		for j := range s {
+			if s[i] == s[j] {
+				count++
+			}
+		}
+
+		if count == 1 {
+			return rune(s[i])
+		}
+	}
+
+	return res
+}
+
+func FirstNonRepeatingCharacterV2(s string) rune { //Optimized hashmap, Time O(n), Space O(n)
 	var res rune
 
 	charCount := map[rune]int{}
