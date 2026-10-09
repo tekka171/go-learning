@@ -2,6 +2,7 @@ package kvstore
 
 import (
 	"bytes"
+	"strconv"
 	"sync"
 	"testing"
 	"time"
@@ -10,7 +11,7 @@ import (
 // fake clock: tests in the same package can replace s.now
 func newTestStore() (*Store, *time.Time) {
 	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
-	s := NewStore(0)
+	s := NewStore(Config{})
 	s.now = func() time.Time { return now }
 	return s, &now
 }
@@ -323,7 +324,7 @@ func TestConcurrentAccess(t *testing.T) {
 }
 
 func TestConcurrentAccessWithExpiry(t *testing.T) {
-	s := NewStore(0)
+	s := NewStore(Config{})
 	var wg sync.WaitGroup
 
 	for i := 0; i < 100; i++ {
@@ -349,18 +350,18 @@ func TestConcurrentAccessWithExpiry(t *testing.T) {
 }
 
 func TestCloseWithZeroInterval(t *testing.T) {
-	s := NewStore(0)
+	s := NewStore(Config{})
 	s.Close()
 }
 
 func TestCloseMoreThanOnce(t *testing.T) {
-	s := NewStore(10 * time.Second)
+	s := NewStore(Config{CleanupInterval: 10 * time.Second})
 	s.Close()
 	s.Close()
 }
 
 func TestJanitorWorks(t *testing.T) {
-	s := NewStore(5 * time.Millisecond)
+	s := NewStore(Config{CleanupInterval: 5 * time.Millisecond})
 	defer s.Close()
 
 	s.Set("k", []byte("hello"), 1*time.Millisecond)
@@ -396,5 +397,194 @@ func TestDeleteExpired(t *testing.T) {
 
 	if _, ok := s.items["k3"]; !ok {
 		t.Fatalf("k3 has no TTL and should have been kept")
+	}
+}
+
+func TestEvictOldestAtCapacity(t *testing.T) {
+	s := NewStore(Config{MaxEntries: 2})
+	s.Set("k1", []byte("hello 1"), 0)
+	s.Set("k2", []byte("hello 2"), 0)
+	s.Set("k3", []byte("hello 3"), 0)
+
+	if got := len(s.items); got != 2 {
+		t.Fatalf("len(items) = %d, want 2", got)
+	}
+
+	if _, ok := s.items["k1"]; ok {
+		t.Fatalf("k1 is the oldest and should be evicted")
+	}
+
+	if _, ok := s.items["k2"]; !ok {
+		t.Fatalf("k2 is not the oldest and should exist")
+	}
+
+	if _, ok := s.items["k3"]; !ok {
+		t.Fatalf("k3 is the newest and should exist")
+	}
+}
+
+func TestGetRefreshRecency(t *testing.T) {
+	s := NewStore(Config{MaxEntries: 3})
+	s.Set("k1", []byte("hello 1"), 0)
+	s.Set("k2", []byte("hello 2"), 0)
+	s.Set("k3", []byte("hello 3"), 0)
+
+	//currently k1 is oldest, do Get() & it should be the most recent
+	if _, ok := s.Get("k1"); !ok {
+		t.Fatalf("k1 is should exist")
+	}
+
+	if mru := s.lru.Front(); mru.Value.(*item).key != "k1" {
+		t.Fatalf("k1 should be the most recent instead of %+v", mru.Value)
+	}
+
+	if lru := s.lru.Back(); lru.Value.(*item).key != "k2" {
+		t.Fatalf("k2 should be the least recent instead of %+v", lru.Value)
+	}
+}
+
+func TestOverwriteAtCapacity(t *testing.T) {
+	s := NewStore(Config{MaxEntries: 3})
+	s.Set("k1", []byte("hello 1"), 0)
+	s.Set("k2", []byte("hello 2"), 0)
+	s.Set("k3", []byte("hello 3"), 0)
+
+	//currently k2 is in the middle, overwrite with Set() & it should be the most recent
+	s.Set("k2", []byte("hello 2 new"), 0)
+
+	if got := len(s.items); got != 3 {
+		t.Fatalf("len(items) = %d, want 3", got)
+	}
+
+	if mru := s.lru.Front(); mru.Value.(*item).key != "k2" {
+		t.Fatalf("k2 should be the most recent instead of %+v", mru.Value)
+	}
+
+	if lru := s.lru.Back(); lru.Value.(*item).key != "k1" {
+		t.Fatalf("k1 should be the least recent instead of %+v", lru.Value)
+	}
+
+	got, ok := s.items["k2"]
+	if !ok {
+		t.Fatalf("k2 should still exist after overwrite")
+	}
+
+	if !bytes.Equal(got.Value.(*item).value, []byte("hello 2 new")) {
+		t.Fatalf("k2 value = %q, want 'hello 2 new'", got.Value.(*item).value)
+	}
+}
+
+func TestMaxEntries(t *testing.T) {
+	s := NewStore(Config{MaxEntries: 1})
+	s.Set("k1", []byte("hello 1"), 0)
+	s.Set("k2", []byte("hello 2"), 0)
+	s.Set("k3", []byte("hello 3"), 0)
+
+	if got := len(s.items); got != 1 {
+		t.Fatalf("len(items) = %d, want 1", got)
+	}
+
+	if _, ok := s.items["k1"]; ok {
+		t.Fatalf("k1 should be evicted")
+	}
+
+	if _, ok := s.items["k2"]; ok {
+		t.Fatalf("k2 should be evicted")
+	}
+
+	if _, ok := s.items["k3"]; !ok {
+		t.Fatalf("k3 is the newest and should be the one kept")
+	}
+}
+
+func TestMaxEntriesUnlimited(t *testing.T) {
+	s := NewStore(Config{MaxEntries: 0})
+	for i := range 1000 {
+		s.Set("k"+strconv.Itoa(i), []byte("hello "), 0)
+	}
+
+	if got := len(s.items); got != 1000 {
+		t.Fatalf("total items %d does not match maxEntries %d", got, 1000)
+	}
+}
+
+func TestDeleteFreeSlot(t *testing.T) {
+	s := NewStore(Config{MaxEntries: 2})
+	s.Set("k1", []byte("hello 1"), 0)
+	s.Set("k2", []byte("hello 2"), 0)
+	s.Delete("k2")
+	s.Set("k3", []byte("hello 3"), 0)
+
+	if got := len(s.items); got != 2 {
+		t.Fatalf("len(items) = %d, want 2", got)
+	}
+
+	if _, ok := s.items["k1"]; !ok {
+		t.Fatalf("k1 should exist")
+	}
+
+	if _, ok := s.items["k3"]; !ok {
+		t.Fatalf("k3 should exist since still within capacity")
+	}
+}
+
+func TestMapAndListInSync(t *testing.T) {
+	s := NewStore(Config{MaxEntries: 3})
+	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	s.now = func() time.Time { return now }
+
+	// set 3 entries
+	s.Set("k1", []byte("hello 1"), 10*time.Millisecond)
+	s.Set("k2", []byte("hello 2"), time.Second)
+	s.Set("k3", []byte("hello 3"), time.Minute)
+	assertInSync(t, s, "Set 3 entries")
+	if got := len(s.items); got != 3 {
+		t.Fatalf("len(items) = %d, want 3", got)
+	}
+
+	// overwrite 1
+	s.Set("k2", []byte("hello 2 new"), 2*time.Second)
+	s.Get("k2")
+	assertInSync(t, s, "Overwrite & Get k2")
+
+	// delete 1
+	s.Delete("k2")
+	assertInSync(t, s, "Delete k2")
+	if got := len(s.items); got != 2 {
+		t.Fatalf("after delete, len(items) = %d, want 2", got)
+	}
+
+	// advance time to lazy expire 1
+	now = now.Add(100 * time.Millisecond)
+	s.Get("k1")
+	assertInSync(t, s, "Push time & Get to trigger lazy expire on k1")
+	if got := len(s.items); got != 1 {
+		t.Fatalf("after lazy expire, len(items) = %d, want 1", got)
+	}
+
+	// trigger janitor
+	now = now.Add(10 * time.Minute)
+	s.deleteExpired()
+	assertInSync(t, s, "Push time again & trigger janitor")
+	if got := len(s.items); got != 0 {
+		t.Fatalf("after janitor cleanup, len(items) = %d, want 0", got)
+	}
+
+	// set 4 to trigger eviction
+	s.Set("k11", []byte("hello 11"), 10*time.Millisecond)
+	s.Set("k12", []byte("hello 12"), time.Second)
+	s.Set("k13", []byte("hello 13"), time.Minute)
+	s.Set("k14", []byte("hello 14"), time.Minute)
+	assertInSync(t, s, "Set 4 & evict")
+	if got := len(s.items); got != 3 {
+		t.Fatalf("after eviction, len(items) = %d, want 3", got)
+	}
+
+}
+
+func assertInSync(t *testing.T, s *Store, step string) {
+	t.Helper()
+	if s.lru.Len() != len(s.items) {
+		t.Fatalf("%s: lru.Len() = %d, len(items) = %d", step, s.lru.Len(), len(s.items))
 	}
 }
