@@ -183,3 +183,52 @@ func (s *Store) deadline(ttl time.Duration) time.Time {
 	}
 	return time.Time{}
 }
+
+// Expire sets a new TTL on an existing live key and reports whether the key existed.
+// A ttl of 0 clears the deadline, so the key never expires.
+// A key that has already expired is deleted and reported as missing.
+// Expire does not count as a use for LRU eviction.
+func (s *Store) Expire(key string, ttl time.Duration) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	el, ok := s.items[key]
+	if !ok {
+		return false
+	}
+
+	now := s.now()
+	it := el.Value.(*item)
+	if it.expired(now) {
+		s.removeElement(el)
+		return false
+	}
+
+	it.expiresAt = s.deadline(ttl)
+	return true
+}
+
+// TTL returns the remaining time for a key.
+// exists is false for a missing or expired key; hasTTL is false for a key with no expiry.
+// TTL does not count as a use for LRU eviction.
+func (s *Store) TTL(key string) (remaining time.Duration, exists, hasTTL bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	el, ok := s.items[key]
+	if !ok {
+		return 0, false, false
+	}
+
+	now := s.now()
+	it := el.Value.(*item)
+	if it.expired(now) {
+		return 0, false, false
+	}
+
+	if it.expiresAt.IsZero() {
+		return 0, true, false
+	}
+
+	return it.expiresAt.Sub(now), true, true
+}

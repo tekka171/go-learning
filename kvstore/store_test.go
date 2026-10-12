@@ -588,3 +588,191 @@ func assertInSync(t *testing.T, s *Store, step string) {
 		t.Fatalf("%s: lru.Len() = %d, len(items) = %d", step, s.lru.Len(), len(s.items))
 	}
 }
+
+func TestTTL(t *testing.T) {
+	tests := []struct {
+		name          string
+		setKey        string
+		ttlKey        string
+		ttl           time.Duration
+		advance       time.Duration
+		wantRemaining time.Duration
+		wantExists    bool
+		wantHasTTL    bool
+	}{
+		{
+			name:          "missing key",
+			setKey:        "k",
+			ttlKey:        "k_miss",
+			ttl:           100 * time.Second,
+			advance:       10 * time.Second,
+			wantRemaining: 0,
+			wantExists:    false,
+			wantHasTTL:    false,
+		},
+		{
+			name:          "no-TTL key",
+			setKey:        "k",
+			ttlKey:        "k",
+			ttl:           0,
+			advance:       10 * time.Second,
+			wantRemaining: 0,
+			wantExists:    true,
+			wantHasTTL:    false,
+		},
+		{
+			name:          "valid key with remaining",
+			setKey:        "k",
+			ttlKey:        "k",
+			ttl:           100 * time.Second,
+			advance:       90 * time.Second,
+			wantRemaining: 10 * time.Second,
+			wantExists:    true,
+			wantHasTTL:    true,
+		},
+		{
+			name:          "expired key",
+			setKey:        "k",
+			ttlKey:        "k",
+			ttl:           10 * time.Second,
+			advance:       100 * time.Second,
+			wantRemaining: 0,
+			wantExists:    false,
+			wantHasTTL:    false,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			s, now := newTestStore()
+
+			s.Set(tc.setKey, []byte("first"), tc.ttl)
+
+			*now = now.Add(tc.advance)
+
+			remaining, exists, hasTTL := s.TTL(tc.ttlKey)
+
+			if remaining != tc.wantRemaining {
+				t.Fatalf("remaining = %v, want %v", remaining, tc.wantRemaining)
+			}
+			if exists != tc.wantExists {
+				t.Fatalf("exists = %v, want %v", exists, tc.wantExists)
+			}
+			if hasTTL != tc.wantHasTTL {
+				t.Fatalf("hasTTL = %v, want %v", hasTTL, tc.wantHasTTL)
+			}
+		})
+	}
+}
+
+func TestExpireMissingKey(t *testing.T) {
+	s := NewStore(Config{})
+	s.Set("k", []byte("hello"), 0)
+	if got := s.Expire("k_miss", 100*time.Second); got {
+		t.Fatalf("Expire on missing key returned true")
+	}
+
+	if len(s.items) != 1 {
+		t.Fatalf("len(items) = %d, want 1", len(s.items))
+	}
+
+	if _, ok := s.items["k"]; !ok {
+		t.Fatalf("Key 'k' should exists")
+	}
+
+	if _, ok := s.items["k_miss"]; ok {
+		t.Fatalf("Key 'k_miss' should not exist since not Set() yet")
+	}
+}
+
+func TestExpireIsExpired(t *testing.T) {
+	s, now := newTestStore()
+	s.Set("k", []byte("hello"), 10*time.Second)
+
+	*now = now.Add(100 * time.Second)
+
+	if got := s.Expire("k", 100*time.Second); got {
+		t.Fatalf("Key should be expired")
+	}
+
+	if _, ok := s.items["k"]; ok {
+		t.Fatalf("expired key should be removed by Expire")
+	}
+}
+
+func TestExpire(t *testing.T) {
+	s, now := newTestStore()
+	s.Set("k", []byte("hello"), 100*time.Second)
+
+	*now = now.Add(10 * time.Second)
+
+	if got := s.Expire("k", 500*time.Second); !got {
+		t.Fatalf("Key expire should be updated since not expired yet")
+	}
+
+	val, ok := s.items["k"]
+	if !ok {
+		t.Fatalf("key not found after Expire")
+	}
+
+	if want := now.Add(500 * time.Second); !val.Value.(*item).expiresAt.Equal(want) {
+		t.Fatalf("Expires_at = %v, want %v", val.Value.(*item).expiresAt, want)
+	}
+}
+
+func TestExpireToNoTTL(t *testing.T) {
+	s, now := newTestStore()
+	s.Set("k", []byte("hello"), 10*time.Second)
+	if !s.Expire("k", 0) {
+		t.Fatalf("Expire on a live key returned false")
+	}
+
+	*now = now.Add(1000 * time.Hour)
+
+	if _, ok := s.Get("k"); !ok {
+		t.Fatalf("non expired key returned false")
+	}
+
+	remaining, exists, hasTTL := s.TTL("k")
+	if remaining != 0 {
+		t.Fatalf("remaining = %v, want 0", remaining)
+	}
+
+	if !exists {
+		t.Fatalf("exists = %v, want true", exists)
+	}
+
+	if hasTTL {
+		t.Fatalf("Non expired key should have no TTL")
+	}
+}
+
+func TestRecencyUnchanged(t *testing.T) {
+	s := NewStore(Config{MaxEntries: 3})
+	s.Set("k1", []byte("hello 1"), 0)
+	s.Set("k2", []byte("hello 2"), 0)
+	s.Set("k3", []byte("hello 3"), 0)
+
+	//TTL & Expire should not affect lru
+	s.TTL("k1")
+	if !s.Expire("k1", 100*time.Second) {
+		t.Fatalf("Expire should returned true since key still exist")
+	}
+
+	s.Set("k4", []byte("hello 4"), 0) //add new, should evict the oldest 'k1'
+
+	if _, ok := s.items["k1"]; ok {
+		t.Fatalf("k1 should be evicted since is LRU")
+	}
+
+	if _, ok := s.items["k2"]; !ok {
+		t.Fatalf("k2 should exist")
+	}
+
+	if _, ok := s.items["k3"]; !ok {
+		t.Fatalf("k3 should exist")
+	}
+
+	if _, ok := s.items["k4"]; !ok {
+		t.Fatalf("k4 should exist")
+	}
+}
