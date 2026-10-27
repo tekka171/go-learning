@@ -157,3 +157,114 @@ func TestReadMultiCommand(t *testing.T) {
 		t.Fatalf("third call err = %v, wants io.EOF", err)
 	}
 }
+
+func TestWriters(t *testing.T) {
+	tests := []struct {
+		name    string
+		write   func(w io.Writer) error
+		want    string
+		wantErr bool
+	}{
+		{
+			name:  "simple string",
+			write: func(w io.Writer) error { return WriteSimpleString(w, "OK") },
+			want:  "+OK\r\n",
+		},
+		{
+			name:  "error",
+			write: func(w io.Writer) error { return WriteError(w, "ERR error message") },
+			want:  "-ERR error message\r\n",
+		},
+		{
+			name:    "error with newline",
+			write:   func(w io.Writer) error { return WriteError(w, "ERR error message \n") },
+			wantErr: true,
+		},
+		{
+			name:  "zero int",
+			write: func(w io.Writer) error { return WriteInteger(w, 0) },
+			want:  ":0\r\n",
+		},
+		{
+			name:  "positive int",
+			write: func(w io.Writer) error { return WriteInteger(w, 5) },
+			want:  ":5\r\n",
+		},
+		{
+			name:  "negative int",
+			write: func(w io.Writer) error { return WriteInteger(w, -8) },
+			want:  ":-8\r\n",
+		},
+		{
+			name:  "empty bulk string",
+			write: func(w io.Writer) error { return WriteBulkString(w, []byte("")) },
+			want:  "$0\r\n\r\n",
+		},
+		{
+			name:  "bulk string",
+			write: func(w io.Writer) error { return WriteBulkString(w, []byte("hello")) },
+			want:  "$5\r\nhello\r\n",
+		},
+		{
+			name:  "bulk string with CRLF",
+			write: func(w io.Writer) error { return WriteBulkString(w, []byte("\rhello\n")) },
+			want:  "$7\r\n\rhello\n\r\n",
+		},
+		{
+			name:  "null",
+			write: func(w io.Writer) error { return WriteNull(w) },
+			want:  "$-1\r\n",
+		},
+		{
+			name:    "simple string with newline",
+			write:   func(w io.Writer) error { return WriteSimpleString(w, "hello\n") },
+			wantErr: true,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var buff bytes.Buffer
+			err := tc.write(&buff)
+
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("expected an error, got nil")
+				}
+
+				if buff.Len() != 0 {
+					t.Fatalf("wrote %q on error, want nothing", buff.String())
+				}
+				return
+			}
+
+			if err != nil {
+				t.Fatalf("err: %s", err)
+			}
+
+			if buff.String() != tc.want {
+				t.Fatalf("Get value = %q, want %q", buff.String(), tc.want)
+			}
+		})
+	}
+}
+
+func TestRoundTrip(t *testing.T) {
+	var buff bytes.Buffer
+	buff.WriteString("*1\r\n")
+	WriteBulkString(&buff, []byte("hello"))
+
+	r := bufio.NewReader(&buff)
+	res, err := ReadCommand(r)
+
+	if err != nil {
+		t.Fatalf("err: %s", err)
+	}
+
+	if len(res) != 1 {
+		t.Fatalf("Get length = %v, want %v", len(res), 1)
+	}
+
+	if !bytes.Equal(res[0], []byte("hello")) {
+		t.Fatalf("Get value = %q, want %v", res[0], "hello")
+	}
+}
