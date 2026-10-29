@@ -223,16 +223,16 @@ func TestWriters(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			var buff bytes.Buffer
-			err := tc.write(&buff)
+			var buf bytes.Buffer
+			err := tc.write(&buf)
 
 			if tc.wantErr {
 				if err == nil {
 					t.Fatalf("expected an error, got nil")
 				}
 
-				if buff.Len() != 0 {
-					t.Fatalf("wrote %q on error, want nothing", buff.String())
+				if buf.Len() != 0 {
+					t.Fatalf("wrote %q on error, want nothing", buf.String())
 				}
 				return
 			}
@@ -241,19 +241,19 @@ func TestWriters(t *testing.T) {
 				t.Fatalf("err: %s", err)
 			}
 
-			if buff.String() != tc.want {
-				t.Fatalf("Get value = %q, want %q", buff.String(), tc.want)
+			if buf.String() != tc.want {
+				t.Fatalf("Get value = %q, want %q", buf.String(), tc.want)
 			}
 		})
 	}
 }
 
 func TestRoundTrip(t *testing.T) {
-	var buff bytes.Buffer
-	buff.WriteString("*1\r\n")
-	WriteBulkString(&buff, []byte("hello"))
+	var buf bytes.Buffer
+	buf.WriteString("*1\r\n")
+	WriteBulkString(&buf, []byte("hello"))
 
-	r := bufio.NewReader(&buff)
+	r := bufio.NewReader(&buf)
 	res, err := ReadCommand(r)
 
 	if err != nil {
