@@ -19,6 +19,7 @@ type Server struct {
 	store *kvstore.Store
 
 	mu      sync.Mutex
+	conns   map[net.Conn]struct{}
 	ln      net.Listener
 	closing bool
 
@@ -28,6 +29,7 @@ type Server struct {
 func New(store *kvstore.Store) *Server {
 	return &Server{
 		store: store,
+		conns: map[net.Conn]struct{}{},
 	}
 }
 
@@ -63,8 +65,13 @@ func (s *Server) Serve(ln net.Listener) error {
 			conn.Close()
 			return ErrServerClosed
 		}
+		s.conns[conn] = struct{}{}
 		s.wg.Go(func() {
 			s.serveConn(conn)
+
+			s.mu.Lock()
+			delete(s.conns, conn)
+			s.mu.Unlock()
 		})
 		s.mu.Unlock()
 	}
@@ -93,11 +100,12 @@ func (s *Server) serveConn(conn net.Conn) {
 }
 
 // Shutdown stops accepting connections and waits for active ones to finish.
-// If ctx ends first, it returns ctx.Err().
+// If ctx ends first, it closes the remaining connections, waits for their
+// goroutines to exit, and returns ctx.Err().
 func (s *Server) Shutdown(ctx context.Context) error {
 	s.mu.Lock()
-	s.closing = true
-	if s.ln != nil {
+	s.closing = true // signal to stop accept connections
+	if s.ln != nil { // close active listener
 		s.ln.Close()
 	}
 	s.mu.Unlock()
@@ -111,7 +119,13 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	select {
 	case <-done:
 		return nil
-	case <-ctx.Done():
+	case <-ctx.Done(): // if timeout, close active conns manually
+		s.mu.Lock()
+		for conn := range s.conns {
+			conn.Close()
+		}
+		s.mu.Unlock()
+		s.wg.Wait()
 		return ctx.Err()
 	}
 }

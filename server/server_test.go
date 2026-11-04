@@ -271,12 +271,23 @@ func TestShutdownTimeout(t *testing.T) {
 	conn := dial(t, ln)
 
 	send(t, conn, "*1\r\n$4\r\nPING\r\n")
-	expectLine(t, bufio.NewReader(conn), "+PONG\r\n")
+	r := bufio.NewReader(conn)
+	expectLine(t, r, "+PONG\r\n")
 
 	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 	defer cancel()
 
 	if err := srv.Shutdown(ctx); !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("Shutdown: %v, want context.DeadlineExceeded", err)
+	}
+
+	_, err := r.Read(make([]byte, 1))
+	if err == nil {
+		t.Fatal("read succeeded; want the connection to be closed by the server")
+	}
+
+	var ne net.Error
+	if errors.As(err, &ne) && ne.Timeout() {
+		t.Fatal("read timed out; the server did not close the connection")
 	}
 }
