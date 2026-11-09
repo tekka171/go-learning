@@ -28,7 +28,7 @@ import (
 // - Every path that removes a key (Delete, lazy expiry in Get, the janitor, eviction) keeps the recency structure in sync with the map.
 
 type Store struct {
-	mu      sync.RWMutex
+	mu      sync.Mutex
 	items   map[string]*list.Element
 	lru     *list.List
 	now     func() time.Time
@@ -157,8 +157,8 @@ func (s *Store) Delete(key string) bool {
 
 // counts only live (non-expired) keys
 func (s *Store) Len() int {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
+	s.mu.Lock()
+	defer s.mu.Unlock()
 
 	total := 0
 	now := s.now()
@@ -212,8 +212,8 @@ func (s *Store) Expire(key string, ttl time.Duration) bool {
 // exists is false for a missing or expired key; hasTTL is false for a key with no expiry.
 // TTL does not count as a use for LRU eviction.
 func (s *Store) TTL(key string) (remaining time.Duration, exists, hasTTL bool) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
+	s.mu.Lock()
+	defer s.mu.Unlock()
 
 	el, ok := s.items[key]
 	if !ok {

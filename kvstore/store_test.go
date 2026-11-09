@@ -367,11 +367,11 @@ func TestJanitorWorks(t *testing.T) {
 	s.Set("k", []byte("hello"), 1*time.Millisecond)
 	time.Sleep(50 * time.Millisecond)
 
-	s.mu.RLock()
+	s.mu.Lock()
 	if _, ok := s.items["k"]; ok {
 		t.Fatalf("item should be cleanup already by janitor")
 	}
-	s.mu.RUnlock()
+	s.mu.Unlock()
 }
 
 func TestDeleteExpired(t *testing.T) {
