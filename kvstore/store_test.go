@@ -9,9 +9,11 @@ import (
 )
 
 // fake clock: tests in the same package can replace s.now
-func newTestStore() (*Store, *time.Time) {
+func newTestStore(config Config) (*Store, *time.Time) {
+	config.CleanupInterval = 0 // force no janitor, to prevent race fake clock
+
 	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
-	s := NewStore(Config{})
+	s := NewStore(config)
 	s.now = func() time.Time { return now }
 	return s, &now
 }
@@ -31,7 +33,7 @@ func TestExpiry(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			s, now := newTestStore()
+			s, now := newTestStore(Config{Shards: 1})
 			s.Set("k", []byte("v"), tc.ttl)
 			*now = now.Add(tc.advance)
 			_, ok := s.Get("k")
@@ -70,7 +72,7 @@ func TestExpirySetOverwritesTTL(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			s, now := newTestStore()
+			s, now := newTestStore(Config{Shards: 1})
 			s.Set("k", []byte("first"), tc.firstTTL)
 			s.Set("k", []byte("second"), tc.secondTTL)
 			*now = now.Add(tc.advance)
@@ -103,7 +105,7 @@ func TestBasic(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			s, _ := newTestStore()
+			s, _ := newTestStore(Config{Shards: 1})
 			s.Set(tc.setKey, tc.setValue, tc.setTTL)
 
 			got, ok := s.Get(tc.getKey)
@@ -118,7 +120,7 @@ func TestBasic(t *testing.T) {
 }
 
 func TestBasicSetOverwritesValue(t *testing.T) {
-	s, _ := newTestStore()
+	s, _ := newTestStore(Config{Shards: 1})
 
 	s.Set("k", []byte("first"), 0)
 	s.Set("k", []byte("second"), 0)
@@ -133,7 +135,7 @@ func TestBasicSetOverwritesValue(t *testing.T) {
 }
 
 func TestSetACopy(t *testing.T) {
-	s, _ := newTestStore()
+	s, _ := newTestStore(Config{Shards: 1})
 
 	value := []byte("hello")
 	s.Set("k", value, 0)
@@ -150,7 +152,7 @@ func TestSetACopy(t *testing.T) {
 }
 
 func TestDeleteExpiredKey(t *testing.T) {
-	s, now := newTestStore()
+	s, now := newTestStore(Config{Shards: 1})
 
 	s.Set("k", []byte{'v'}, 100*time.Second)
 
@@ -161,13 +163,13 @@ func TestDeleteExpiredKey(t *testing.T) {
 		t.Fatalf("Delete on an expired key should return false")
 	}
 
-	if _, ok := s.items["k"]; ok {
+	if _, ok := s.shards[0].items["k"]; ok {
 		t.Fatalf("Expired key should be removed from map by Delete")
 	}
 }
 
 func TestExtendAliveTTL(t *testing.T) {
-	s, now := newTestStore()
+	s, now := newTestStore(Config{Shards: 1})
 
 	// set ttl 1 minute
 	s.Set("k", []byte("hello"), time.Minute)
@@ -193,7 +195,7 @@ func TestExtendAliveTTL(t *testing.T) {
 }
 
 func TestGetReturnsACopy(t *testing.T) {
-	s, _ := newTestStore()
+	s, _ := newTestStore(Config{Shards: 1})
 
 	s.Set("k", []byte("hello"), 0)
 
@@ -240,7 +242,7 @@ func TestDelete(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			s, _ := newTestStore()
+			s, _ := newTestStore(Config{Shards: 1})
 			tc.setup(s)
 
 			removed := s.Delete(tc.deleteKey)
@@ -286,7 +288,7 @@ func TestLen(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			s, now := newTestStore()
+			s, now := newTestStore(Config{Shards: 1})
 			tc.setup(s)
 			*now = now.Add(tc.advance)
 
@@ -298,7 +300,7 @@ func TestLen(t *testing.T) {
 }
 
 func TestConcurrentAccess(t *testing.T) {
-	s, _ := newTestStore()
+	s, _ := newTestStore(Config{Shards: 1})
 	var wg sync.WaitGroup
 
 	for i := 0; i < 100; i++ {
@@ -361,21 +363,23 @@ func TestCloseMoreThanOnce(t *testing.T) {
 }
 
 func TestJanitorWorks(t *testing.T) {
-	s := NewStore(Config{CleanupInterval: 5 * time.Millisecond})
+	s := NewStore(Config{Shards: 1, CleanupInterval: 5 * time.Millisecond})
 	defer s.Close()
 
 	s.Set("k", []byte("hello"), 1*time.Millisecond)
 	time.Sleep(50 * time.Millisecond)
 
-	s.mu.Lock()
-	if _, ok := s.items["k"]; ok {
+	s.shards[0].mu.Lock()
+	_, ok := s.shardFor("k").items["k"]
+	s.shards[0].mu.Unlock()
+
+	if ok {
 		t.Fatalf("item should be cleanup already by janitor")
 	}
-	s.mu.Unlock()
 }
 
 func TestDeleteExpired(t *testing.T) {
-	s, now := newTestStore()
+	s, now := newTestStore(Config{Shards: 1})
 	s.Set("k1", []byte("hello 1"), 10*time.Second)
 	s.Set("k2", []byte("hello 2"), 100*time.Second)
 	s.Set("k3", []byte("hello 3"), 0)
@@ -383,48 +387,48 @@ func TestDeleteExpired(t *testing.T) {
 	*now = now.Add(50 * time.Second)
 	s.deleteExpired()
 
-	if got := len(s.items); got != 2 {
+	if got := len(s.shards[0].items); got != 2 {
 		t.Fatalf("len(items) = %d, want 2", got)
 	}
 
-	if _, ok := s.items["k1"]; ok {
+	if _, ok := s.shards[0].items["k1"]; ok {
 		t.Fatalf("k1 is expired and should have been removed")
 	}
 
-	if _, ok := s.items["k2"]; !ok {
+	if _, ok := s.shards[0].items["k2"]; !ok {
 		t.Fatalf("k2 is alive and should have been kept")
 	}
 
-	if _, ok := s.items["k3"]; !ok {
+	if _, ok := s.shards[0].items["k3"]; !ok {
 		t.Fatalf("k3 has no TTL and should have been kept")
 	}
 }
 
 func TestEvictOldestAtCapacity(t *testing.T) {
-	s := NewStore(Config{MaxEntries: 2})
+	s := NewStore(Config{Shards: 1, MaxEntries: 2})
 	s.Set("k1", []byte("hello 1"), 0)
 	s.Set("k2", []byte("hello 2"), 0)
 	s.Set("k3", []byte("hello 3"), 0)
 
-	if got := len(s.items); got != 2 {
+	if got := len(s.shards[0].items); got != 2 {
 		t.Fatalf("len(items) = %d, want 2", got)
 	}
 
-	if _, ok := s.items["k1"]; ok {
+	if _, ok := s.shards[0].items["k1"]; ok {
 		t.Fatalf("k1 is the oldest and should be evicted")
 	}
 
-	if _, ok := s.items["k2"]; !ok {
+	if _, ok := s.shards[0].items["k2"]; !ok {
 		t.Fatalf("k2 is not the oldest and should exist")
 	}
 
-	if _, ok := s.items["k3"]; !ok {
+	if _, ok := s.shards[0].items["k3"]; !ok {
 		t.Fatalf("k3 is the newest and should exist")
 	}
 }
 
 func TestGetRefreshRecency(t *testing.T) {
-	s := NewStore(Config{MaxEntries: 3})
+	s := NewStore(Config{Shards: 1, MaxEntries: 3})
 	s.Set("k1", []byte("hello 1"), 0)
 	s.Set("k2", []byte("hello 2"), 0)
 	s.Set("k3", []byte("hello 3"), 0)
@@ -434,17 +438,17 @@ func TestGetRefreshRecency(t *testing.T) {
 		t.Fatalf("k1 is should exist")
 	}
 
-	if mru := s.lru.Front(); mru.Value.(*item).key != "k1" {
+	if mru := s.shards[0].lru.Front(); mru.Value.(*item).key != "k1" {
 		t.Fatalf("k1 should be the most recent instead of %+v", mru.Value)
 	}
 
-	if lru := s.lru.Back(); lru.Value.(*item).key != "k2" {
+	if lru := s.shards[0].lru.Back(); lru.Value.(*item).key != "k2" {
 		t.Fatalf("k2 should be the least recent instead of %+v", lru.Value)
 	}
 }
 
 func TestOverwriteAtCapacity(t *testing.T) {
-	s := NewStore(Config{MaxEntries: 3})
+	s := NewStore(Config{Shards: 1, MaxEntries: 3})
 	s.Set("k1", []byte("hello 1"), 0)
 	s.Set("k2", []byte("hello 2"), 0)
 	s.Set("k3", []byte("hello 3"), 0)
@@ -452,19 +456,19 @@ func TestOverwriteAtCapacity(t *testing.T) {
 	//currently k2 is in the middle, overwrite with Set() & it should be the most recent
 	s.Set("k2", []byte("hello 2 new"), 0)
 
-	if got := len(s.items); got != 3 {
+	if got := len(s.shards[0].items); got != 3 {
 		t.Fatalf("len(items) = %d, want 3", got)
 	}
 
-	if mru := s.lru.Front(); mru.Value.(*item).key != "k2" {
+	if mru := s.shards[0].lru.Front(); mru.Value.(*item).key != "k2" {
 		t.Fatalf("k2 should be the most recent instead of %+v", mru.Value)
 	}
 
-	if lru := s.lru.Back(); lru.Value.(*item).key != "k1" {
+	if lru := s.shards[0].lru.Back(); lru.Value.(*item).key != "k1" {
 		t.Fatalf("k1 should be the least recent instead of %+v", lru.Value)
 	}
 
-	got, ok := s.items["k2"]
+	got, ok := s.shards[0].items["k2"]
 	if !ok {
 		t.Fatalf("k2 should still exist after overwrite")
 	}
@@ -475,61 +479,61 @@ func TestOverwriteAtCapacity(t *testing.T) {
 }
 
 func TestMaxEntries(t *testing.T) {
-	s := NewStore(Config{MaxEntries: 1})
+	s := NewStore(Config{Shards: 1, MaxEntries: 1})
 	s.Set("k1", []byte("hello 1"), 0)
 	s.Set("k2", []byte("hello 2"), 0)
 	s.Set("k3", []byte("hello 3"), 0)
 
-	if got := len(s.items); got != 1 {
+	if got := len(s.shards[0].items); got != 1 {
 		t.Fatalf("len(items) = %d, want 1", got)
 	}
 
-	if _, ok := s.items["k1"]; ok {
+	if _, ok := s.shards[0].items["k1"]; ok {
 		t.Fatalf("k1 should be evicted")
 	}
 
-	if _, ok := s.items["k2"]; ok {
+	if _, ok := s.shards[0].items["k2"]; ok {
 		t.Fatalf("k2 should be evicted")
 	}
 
-	if _, ok := s.items["k3"]; !ok {
+	if _, ok := s.shards[0].items["k3"]; !ok {
 		t.Fatalf("k3 is the newest and should be the one kept")
 	}
 }
 
 func TestMaxEntriesUnlimited(t *testing.T) {
-	s := NewStore(Config{MaxEntries: 0})
+	s := NewStore(Config{Shards: 1, MaxEntries: 0})
 	for i := range 1000 {
 		s.Set("k"+strconv.Itoa(i), []byte("hello "), 0)
 	}
 
-	if got := len(s.items); got != 1000 {
+	if got := len(s.shards[0].items); got != 1000 {
 		t.Fatalf("total items %d does not match maxEntries %d", got, 1000)
 	}
 }
 
 func TestDeleteFreeSlot(t *testing.T) {
-	s := NewStore(Config{MaxEntries: 2})
+	s := NewStore(Config{Shards: 1, MaxEntries: 2})
 	s.Set("k1", []byte("hello 1"), 0)
 	s.Set("k2", []byte("hello 2"), 0)
 	s.Delete("k2")
 	s.Set("k3", []byte("hello 3"), 0)
 
-	if got := len(s.items); got != 2 {
+	if got := len(s.shards[0].items); got != 2 {
 		t.Fatalf("len(items) = %d, want 2", got)
 	}
 
-	if _, ok := s.items["k1"]; !ok {
+	if _, ok := s.shards[0].items["k1"]; !ok {
 		t.Fatalf("k1 should exist")
 	}
 
-	if _, ok := s.items["k3"]; !ok {
+	if _, ok := s.shards[0].items["k3"]; !ok {
 		t.Fatalf("k3 should exist since still within capacity")
 	}
 }
 
 func TestMapAndListInSync(t *testing.T) {
-	s := NewStore(Config{MaxEntries: 3})
+	s := NewStore(Config{Shards: 1, MaxEntries: 3})
 	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	s.now = func() time.Time { return now }
 
@@ -538,7 +542,7 @@ func TestMapAndListInSync(t *testing.T) {
 	s.Set("k2", []byte("hello 2"), time.Second)
 	s.Set("k3", []byte("hello 3"), time.Minute)
 	assertInSync(t, s, "Set 3 entries")
-	if got := len(s.items); got != 3 {
+	if got := len(s.shards[0].items); got != 3 {
 		t.Fatalf("len(items) = %d, want 3", got)
 	}
 
@@ -550,7 +554,7 @@ func TestMapAndListInSync(t *testing.T) {
 	// delete 1
 	s.Delete("k2")
 	assertInSync(t, s, "Delete k2")
-	if got := len(s.items); got != 2 {
+	if got := len(s.shards[0].items); got != 2 {
 		t.Fatalf("after delete, len(items) = %d, want 2", got)
 	}
 
@@ -558,7 +562,7 @@ func TestMapAndListInSync(t *testing.T) {
 	now = now.Add(100 * time.Millisecond)
 	s.Get("k1")
 	assertInSync(t, s, "Push time & Get to trigger lazy expire on k1")
-	if got := len(s.items); got != 1 {
+	if got := len(s.shards[0].items); got != 1 {
 		t.Fatalf("after lazy expire, len(items) = %d, want 1", got)
 	}
 
@@ -566,7 +570,7 @@ func TestMapAndListInSync(t *testing.T) {
 	now = now.Add(10 * time.Minute)
 	s.deleteExpired()
 	assertInSync(t, s, "Push time again & trigger janitor")
-	if got := len(s.items); got != 0 {
+	if got := len(s.shards[0].items); got != 0 {
 		t.Fatalf("after janitor cleanup, len(items) = %d, want 0", got)
 	}
 
@@ -576,7 +580,7 @@ func TestMapAndListInSync(t *testing.T) {
 	s.Set("k13", []byte("hello 13"), time.Minute)
 	s.Set("k14", []byte("hello 14"), time.Minute)
 	assertInSync(t, s, "Set 4 & evict")
-	if got := len(s.items); got != 3 {
+	if got := len(s.shards[0].items); got != 3 {
 		t.Fatalf("after eviction, len(items) = %d, want 3", got)
 	}
 
@@ -584,8 +588,8 @@ func TestMapAndListInSync(t *testing.T) {
 
 func assertInSync(t *testing.T, s *Store, step string) {
 	t.Helper()
-	if s.lru.Len() != len(s.items) {
-		t.Fatalf("%s: lru.Len() = %d, len(items) = %d", step, s.lru.Len(), len(s.items))
+	if s.shards[0].lru.Len() != len(s.shards[0].items) {
+		t.Fatalf("%s: lru.Len() = %d, len(items) = %d", step, s.shards[0].lru.Len(), len(s.shards[0].items))
 	}
 }
 
@@ -643,7 +647,7 @@ func TestTTL(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			s, now := newTestStore()
+			s, now := newTestStore(Config{Shards: 1})
 
 			s.Set(tc.setKey, []byte("first"), tc.ttl)
 
@@ -665,27 +669,27 @@ func TestTTL(t *testing.T) {
 }
 
 func TestExpireMissingKey(t *testing.T) {
-	s := NewStore(Config{})
+	s := NewStore(Config{Shards: 1})
 	s.Set("k", []byte("hello"), 0)
 	if got := s.Expire("k_miss", 100*time.Second); got {
 		t.Fatalf("Expire on missing key returned true")
 	}
 
-	if len(s.items) != 1 {
-		t.Fatalf("len(items) = %d, want 1", len(s.items))
+	if len(s.shards[0].items) != 1 {
+		t.Fatalf("len(items) = %d, want 1", len(s.shards[0].items))
 	}
 
-	if _, ok := s.items["k"]; !ok {
+	if _, ok := s.shards[0].items["k"]; !ok {
 		t.Fatalf("Key 'k' should exists")
 	}
 
-	if _, ok := s.items["k_miss"]; ok {
+	if _, ok := s.shards[0].items["k_miss"]; ok {
 		t.Fatalf("Key 'k_miss' should not exist since not Set() yet")
 	}
 }
 
 func TestExpireIsExpired(t *testing.T) {
-	s, now := newTestStore()
+	s, now := newTestStore(Config{Shards: 1})
 	s.Set("k", []byte("hello"), 10*time.Second)
 
 	*now = now.Add(100 * time.Second)
@@ -694,13 +698,13 @@ func TestExpireIsExpired(t *testing.T) {
 		t.Fatalf("Key should be expired")
 	}
 
-	if _, ok := s.items["k"]; ok {
+	if _, ok := s.shards[0].items["k"]; ok {
 		t.Fatalf("expired key should be removed by Expire")
 	}
 }
 
 func TestExpire(t *testing.T) {
-	s, now := newTestStore()
+	s, now := newTestStore(Config{Shards: 1})
 	s.Set("k", []byte("hello"), 100*time.Second)
 
 	*now = now.Add(10 * time.Second)
@@ -709,7 +713,7 @@ func TestExpire(t *testing.T) {
 		t.Fatalf("Key expire should be updated since not expired yet")
 	}
 
-	val, ok := s.items["k"]
+	val, ok := s.shards[0].items["k"]
 	if !ok {
 		t.Fatalf("key not found after Expire")
 	}
@@ -720,7 +724,7 @@ func TestExpire(t *testing.T) {
 }
 
 func TestExpireToNoTTL(t *testing.T) {
-	s, now := newTestStore()
+	s, now := newTestStore(Config{Shards: 1})
 	s.Set("k", []byte("hello"), 10*time.Second)
 	if !s.Expire("k", 0) {
 		t.Fatalf("Expire on a live key returned false")
@@ -747,7 +751,7 @@ func TestExpireToNoTTL(t *testing.T) {
 }
 
 func TestRecencyUnchanged(t *testing.T) {
-	s := NewStore(Config{MaxEntries: 3})
+	s := NewStore(Config{Shards: 1, MaxEntries: 3})
 	s.Set("k1", []byte("hello 1"), 0)
 	s.Set("k2", []byte("hello 2"), 0)
 	s.Set("k3", []byte("hello 3"), 0)
@@ -760,19 +764,108 @@ func TestRecencyUnchanged(t *testing.T) {
 
 	s.Set("k4", []byte("hello 4"), 0) //add new, should evict the oldest 'k1'
 
-	if _, ok := s.items["k1"]; ok {
+	if _, ok := s.shards[0].items["k1"]; ok {
 		t.Fatalf("k1 should be evicted since is LRU")
 	}
 
-	if _, ok := s.items["k2"]; !ok {
+	if _, ok := s.shards[0].items["k2"]; !ok {
 		t.Fatalf("k2 should exist")
 	}
 
-	if _, ok := s.items["k3"]; !ok {
+	if _, ok := s.shards[0].items["k3"]; !ok {
 		t.Fatalf("k3 should exist")
 	}
 
-	if _, ok := s.items["k4"]; !ok {
+	if _, ok := s.shards[0].items["k4"]; !ok {
 		t.Fatalf("k4 should exist")
+	}
+}
+
+func TestMultiShardsSetGet(t *testing.T) {
+	s := NewStore(Config{})
+	defer s.Close()
+
+	keys := make([]string, 1000)
+	values := make([][]byte, 1000)
+	for i := range keys {
+		keys[i] = "key_" + strconv.Itoa(i)
+		values[i] = []byte("value_" + strconv.Itoa(i))
+	}
+
+	for i := range keys {
+		s.Set(keys[i], values[i], 0)
+	}
+
+	for i := range keys {
+		val, ok := s.Get(keys[i])
+		if !ok || !bytes.Equal(val, values[i]) {
+			t.Fatalf("key %v get %q, want %q", keys[i], val, values[i])
+		}
+	}
+}
+
+func TestMultiShardsLen(t *testing.T) {
+	s, now := newTestStore(Config{})
+
+	keys := make([]string, 100)
+	for i := range keys {
+		keys[i] = "key_" + strconv.Itoa(i)
+	}
+	val := []byte("val")
+
+	for i := range keys {
+		var ttl time.Duration
+		if i >= 60 {
+			ttl = 50 * time.Millisecond
+		}
+		s.Set(keys[i], val, ttl)
+	}
+
+	*now = now.Add(500 * time.Millisecond)
+
+	if got := s.Len(); got != 60 {
+		t.Fatalf("len: %v, want 60", got)
+	}
+
+	nonEmpty := 0
+	for _, sh := range s.shards {
+		if len(sh.items) > 0 {
+			nonEmpty++
+		}
+	}
+
+	if nonEmpty < 2 {
+		t.Fatalf("keys landed in %d shard(s), test needs them spread across several", nonEmpty)
+	}
+}
+
+func TestMultiShardsJanitorWorks(t *testing.T) {
+	s, now := newTestStore(Config{})
+
+	keys := make([]string, 1000)
+	for i := range keys {
+		keys[i] = "key_" + strconv.Itoa(i)
+	}
+	val := []byte("val")
+
+	for i := range keys {
+		var ttl time.Duration
+		if i%10 == 0 {
+			ttl = 50 * time.Millisecond
+		}
+		s.Set(keys[i], val, ttl)
+	}
+
+	*now = now.Add(500 * time.Millisecond)
+
+	s.deleteExpired()
+
+	totalEntries := 0
+	for _, sh := range s.shards {
+		totalEntries += len(sh.items)
+	}
+
+	if totalEntries != 900 {
+		t.Fatalf("totalEntries: %v, want 900", totalEntries)
 	}
 }

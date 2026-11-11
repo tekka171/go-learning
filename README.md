@@ -16,6 +16,7 @@ standard library.
 - Graceful shutdown: stops accepting, waits for clients, then force-closes
   any that remain when the deadline passes
 - Ctrl+C / SIGTERM handling in the server binary
+- Sharded locking: Keys are spread across independent shards, each with its own lock and LRU list, so concurrent clients rarely wait on each other
 
 ## Requirements
 
@@ -53,6 +54,7 @@ go run ./cmd/kvserver
 | `-addr` | `:6379` | Address to listen on. `:6379` means all interfaces; use `127.0.0.1:6379` for local only. |
 | `-cleanup` | `1s` | Interval between expired-key sweeps. `0` disables the janitor (lazy expiry only). |
 | `-max-entries` | `0` | Maximum number of keys. `0` means unlimited. |
+| `-shards` | `16` | Number of independent partitions. More shards reduce lock contention; LRU order is per shard. |
 
 Example:
 
@@ -115,9 +117,12 @@ Errors follow Redis's wording, for example
 - **`TTL` rounds down** to whole seconds.
 - **LRU eviction**: `GET` (on a hit) and `SET` count as a use; `DEL`, `EXPIRE`,
   and `TTL` do not. Overwriting an existing key never evicts.
-- **`MaxEntries` counts expired keys** until they are removed, either lazily
-  or by the janitor. When full, the least recently used key is evicted, even
-  if other keys have already expired.
+- `MaxEntries` is divided evenly across shards, rounded up, so the store may
+  hold slightly more than `MaxEntries` in total.
+- **Eviction is per shard**: when a key's shard is full, that shard's least
+  recently used entry is evicted, even if the store as a whole is below the
+  limit. Use `-shards 1` for one exact, global LRU order.
+- Expired keys count toward the limit until they are removed.
 - **Protocol errors** (input that isn't valid RESP) get an
   `ERR protocol error` reply, and the connection is then closed.
 - **Input limits**: at most 1024 elements per command, and 512 MiB per
@@ -140,6 +145,7 @@ and `0` after a normal shutdown.
 store := kvstore.NewStore(kvstore.Config{
 	CleanupInterval: time.Second,
 	MaxEntries:      10_000,
+  Shards:          16,
 })
 defer store.Close()
 
@@ -173,10 +179,27 @@ The tests use a few techniques worth knowing:
 - **Read deadlines** on every test connection, so a bug fails the test instead
   of hanging it.
 
+## Performance
+
+Measured on an Intel i7-8750H (6 cores, 12 threads), 100,000 keys, random reads:
+
+| Benchmark | 1 shard | 16 shards |
+|---|---|---|
+| `Get`, 1 goroutine | 486 ns/op | 543 ns/op |
+| `Get`, 12 goroutines | 607 ns/op | 170 ns/op |
+
+With a single lock, adding goroutines made the store *slower*: profiling showed
+most CPU time spent spinning and parking on the mutex. Sharding cut concurrent
+latency by 72%, at the cost of ~10% on a single goroutine (an extra hash to
+pick the shard). Switching the store from `sync.RWMutex` to `sync.Mutex` saved
+a further ~20 ns per operation, since every hot path needs exclusive access.
+
+Run the benchmarks with:
+
+    go test ./kvstore/ -run='^$' -bench='.' -benchmem
+
 ## Possible next steps
 
-- Benchmarks, including `sync.Mutex` vs `sync.RWMutex` in the store
-- Sharding the keyspace to reduce lock contention
 - An expiry heap so the janitor only touches keys that have expired
 - Persistence with an append-only log replayed at startup
 - More commands (`EXISTS`, `INCR`, `MGET`, ...)

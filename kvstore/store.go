@@ -1,9 +1,8 @@
 package kvstore
 
 import (
-	"bytes"
 	"container/list"
-	"sync"
+	"hash/maphash"
 	"time"
 
 	"github.com/tekka171/go-learning/periodic"
@@ -28,35 +27,47 @@ import (
 // - Every path that removes a key (Delete, lazy expiry in Get, the janitor, eviction) keeps the recency structure in sync with the map.
 
 type Store struct {
-	mu      sync.Mutex
-	items   map[string]*list.Element
-	lru     *list.List
+	shards  []*shard
+	seed    maphash.Seed
 	now     func() time.Time
 	janitor *periodic.Worker
-	config  Config
-}
-
-type item struct {
-	key       string
-	value     []byte
-	expiresAt time.Time
 }
 
 type Config struct {
 	CleanupInterval time.Duration // 0 = no janitor
 
-	// MaxEntries is the maximum number of stored entries; 0 means unlimited.
-	// Expired entries count until they are removed.
+	// MaxEntries is the approximate maximum number of stored entries; 0 means
+	// unlimited. The limit is divided evenly across shards, rounded up, so the
+	// store may hold slightly more than MaxEntries in total (at most
+	// Shards-1 extra). Eviction is per shard: when a key's shard is full, that
+	// shard's least recently used entry is evicted, even if the store as a whole
+	// is below the limit. Expired entries count until they are removed.
 	MaxEntries int
+
+	// Shards is a number of independent partitions; 0 means default 16
+	// More shards reduce lock contention; LRU order is per shard.
+	Shards int
 }
 
 func NewStore(config Config) *Store {
+	shardCount := config.Shards
+	if config.Shards <= 0 {
+		shardCount = 16
+	}
+
 	s := &Store{
-		items:   map[string]*list.Element{},
-		lru:     list.New(),
+		shards:  make([]*shard, shardCount),
+		seed:    maphash.MakeSeed(),
 		now:     time.Now,
-		config:  config,
 		janitor: periodic.New(config.CleanupInterval),
+	}
+
+	for i := range s.shards {
+		s.shards[i] = &shard{
+			items:      map[string]*list.Element{},
+			lru:        list.New(),
+			maxEntries: (config.MaxEntries + shardCount - 1) / shardCount, // round up the capacity
+		}
 	}
 
 	s.janitor.Run(s.deleteExpired)
@@ -64,15 +75,15 @@ func NewStore(config Config) *Store {
 	return s
 }
 
-func (s *Store) deleteExpired() {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+func (s *Store) shardFor(key string) *shard {
+	h := maphash.String(s.seed, key)
+	return s.shards[h%uint64(len(s.shards))]
+}
 
+func (s *Store) deleteExpired() {
 	now := s.now()
-	for _, el := range s.items {
-		if el.Value.(*item).expired(now) {
-			s.removeElement(el)
-		}
+	for i := range s.shards {
+		s.shards[i].deleteExpired(now)
 	}
 }
 
@@ -83,103 +94,40 @@ func (s *Store) Close() {
 
 // ttl == 0 means the key never expires
 func (s *Store) Set(key string, value []byte, ttl time.Duration) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	// do update
-	if el, ok := s.items[key]; ok {
-		it := el.Value.(*item)
-		it.value = bytes.Clone(value)
-		it.expiresAt = s.deadline(ttl)
-
-		s.lru.MoveToFront(el)
-		return
-	}
-
-	// if at capacity, evict lru even though other keys have expired
-	if s.config.MaxEntries > 0 && len(s.items) >= s.config.MaxEntries {
-		s.removeElement(s.lru.Back())
-	}
-
-	//do insert
-	it := &item{
-		key:       key,
-		value:     bytes.Clone(value),
-		expiresAt: s.deadline(ttl),
-	}
-
-	el := s.lru.PushFront(it)
-	s.items[key] = el
-}
-
-func (i *item) expired(now time.Time) bool {
-	return !i.expiresAt.IsZero() && !now.Before(i.expiresAt)
+	deadline := s.deadline(ttl)
+	s.shardFor(key).set(key, value, deadline)
 }
 
 // ok is false if the key is missing or expired
 func (s *Store) Get(key string) (value []byte, ok bool) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	now := s.now()
-	el, ok := s.items[key]
-	if !ok { // if not found
-		return nil, false
-	}
-
-	it := el.Value.(*item)
-
-	//if expired, need to do lazy cleanup
-	if it.expired(now) {
-		s.removeElement(el)
-		return nil, false
-	}
-
-	s.lru.MoveToFront(el)
-	return bytes.Clone(it.value), true
+	return s.shardFor(key).get(key, s.now())
 }
 
 // reports whether a key was actually removed
 func (s *Store) Delete(key string) bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	el, ok := s.items[key]
-	if !ok {
-		return false
-	}
-
-	isExpired := el.Value.(*item).expired(s.now())
-	s.removeElement(el)
-
-	return !isExpired
+	return s.shardFor(key).delete(key, s.now())
 }
 
 // counts only live (non-expired) keys
 func (s *Store) Len() int {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	total := 0
 	now := s.now()
-	for _, v := range s.items {
-		if v.Value.(*item).expired(now) {
-			continue
-		}
-		total++
+	count := 0
+	for i := range s.shards {
+		count += s.shards[i].len(now)
 	}
-	return total
-}
-
-func (s *Store) removeElement(el *list.Element) {
-	it := el.Value.(*item)
-	delete(s.items, it.key)
-	s.lru.Remove(el)
+	return count
 }
 
 func (s *Store) deadline(ttl time.Duration) time.Time {
 	if ttl != 0 {
-		return s.now().Add(ttl)
+		return deadlineFrom(ttl, s.now())
+	}
+	return time.Time{}
+}
+
+func deadlineFrom(ttl time.Duration, now time.Time) time.Time {
+	if ttl != 0 {
+		return now.Add(ttl)
 	}
 	return time.Time{}
 }
@@ -189,46 +137,14 @@ func (s *Store) deadline(ttl time.Duration) time.Time {
 // A key that has already expired is deleted and reported as missing.
 // Expire does not count as a use for LRU eviction.
 func (s *Store) Expire(key string, ttl time.Duration) bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	el, ok := s.items[key]
-	if !ok {
-		return false
-	}
-
 	now := s.now()
-	it := el.Value.(*item)
-	if it.expired(now) {
-		s.removeElement(el)
-		return false
-	}
-
-	it.expiresAt = s.deadline(ttl)
-	return true
+	deadline := deadlineFrom(ttl, now)
+	return s.shardFor(key).expire(key, deadline, now)
 }
 
 // TTL returns the remaining time for a key.
 // exists is false for a missing or expired key; hasTTL is false for a key with no expiry.
 // TTL does not count as a use for LRU eviction.
 func (s *Store) TTL(key string) (remaining time.Duration, exists, hasTTL bool) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	el, ok := s.items[key]
-	if !ok {
-		return 0, false, false
-	}
-
-	now := s.now()
-	it := el.Value.(*item)
-	if it.expired(now) {
-		return 0, false, false
-	}
-
-	if it.expiresAt.IsZero() {
-		return 0, true, false
-	}
-
-	return it.expiresAt.Sub(now), true, true
+	return s.shardFor(key).ttl(key, s.now())
 }

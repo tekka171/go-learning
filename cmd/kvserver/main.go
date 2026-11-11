@@ -27,17 +27,20 @@ func run() error {
 	addr := flag.String("addr", ":6379", "address to listen on")
 	cleanup := flag.Duration("cleanup", time.Second, "interval between expired-key sweeps (0 disables)")
 	maxEntries := flag.Int("max-entries", 0, "maximum number of keys (0 means unlimited)")
+	shards := flag.Int("shards", 16, "number of independent partitions (0 means default 16)")
+
 	flag.Parse()
 
 	ln, err := net.Listen("tcp", *addr)
 	if err != nil {
-		return fmt.Errorf("listen on %s:%w", *addr, err)
+		return fmt.Errorf("listen on %s: %w", *addr, err)
 	}
 	log.Printf("listening on %v", ln.Addr())
 
 	store := kvstore.NewStore(kvstore.Config{
 		CleanupInterval: *cleanup,
 		MaxEntries:      *maxEntries,
+		Shards:          *shards,
 	})
 	defer store.Close()
 
